@@ -1,243 +1,163 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.21;
 
-import "@aave/core-v3/contracts/interfaces/IPool.sol";
-import "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
-import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
+import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC721EnumerableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/IERC721EnumerableUpgradeable.sol";
-import {IERC1155Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC1155/IERC1155Upgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import {ERC20BurnableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
 import {ERC20FlashMintUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20FlashMintUpgradeable.sol";
+import {ERC20PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PausableUpgradeable.sol";
+import {ERC20PermitUpgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import {IDAOUpgradeable} from "./interfaces/IDAOUpgradeable.sol";
-import {IStakingUpgradeable} from "./interfaces/IStakingUpgradeable.sol";
-import {IFarmingUpgradeable} from "./interfaces/IFarmingUpgradeable.sol";
-import {INFTMarketplaceUpgradeable} from "./interfaces/INFTMarketplaceUpgradeable.sol";
-import {IGuildInteractionUpgradeable} from "./interfaces/IGuildInteractionUpgradeable.sol";
-import {ICQTTokenSaleContract} from "./interfaces/ICQTTokenSaleContract.sol";
-import {ICryptoQuestTheShardsOfGenesisNFTBook} from "./interfaces/ICryptoQuestTheShardsOfGenesisNFTBook.sol";
-import {ICryptoQuestTheShardsOfGenesisBookNFTSalesContract} from "./interfaces/ICryptoQuestTheShardsOfGenesisBookNFTSalesContract.sol";
-import {ICryptoQuestSwapContract} from "./interfaces/ICryptoQuestSwapContract.sol";
 
-contract CryptoQuestAIFlashLoanArbitrator is 
-    Initializable, 
-    ERC20Upgradeable, 
-    ERC20BurnableUpgradeable, 
-    ERC20FlashMintUpgradeable, 
-    AccessControlUpgradeable, 
+contract CryptoQuestAIFlashLoanArbitrator is
+    Initializable,
+    ERC20Upgradeable,
+    ERC20BurnableUpgradeable,
+    ERC20PausableUpgradeable,
+    AccessControlUpgradeable,
+    ERC20PermitUpgradeable,
+    ERC20FlashMintUpgradeable,
     UUPSUpgradeable,
-    ReentrancyGuardUpgradeable,
-    PausableUpgradeable 
+    ReentrancyGuardUpgradeable
 {
+    // Roles
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 private constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
-    // External contracts
-    IPoolAddressesProvider public addressesProvider;
-    IPool public pool;
-    IERC721EnumerableUpgradeable public nftContract;
-    IERC1155Upgradeable public nftContract1155;
-    IERC20 public cqtToken;
-    ISwapRouter public uniswapRouter;
-    IDAOUpgradeable public daoContract;
-    IStakingUpgradeable public stakingContract;
-    IFarmingUpgradeable public farmingContract;
-    INFTMarketplaceUpgradeable public nftMarketplaceContract;
-    IGuildInteractionUpgradeable public guildInteractionContract;
-    ICQTTokenSaleContract public cqtTokenSaleContract;
-    ICryptoQuestTheShardsOfGenesisNFTBook public nftBookContract;
-    ICryptoQuestTheShardsOfGenesisBookNFTSalesContract public nftBookSalesContract;
-    ICryptoQuestSwapContract public swapContract;
+    // Constants
+    uint256 private constant MAX_FEE_RATE = 1000; // 10% max fee
+    uint256 private constant MIN_FEE_RATE = 50;   // 0.5% min fee
+    uint256 private constant MAX_ARRAY_LENGTH = 100;
 
-    address public treasuryWallet;
-    uint256 public feeRate;
-    uint256 public constant MAX_FEE_RATE = 1000; // 10% max fee
+    // Interfaces
+    IPoolAddressesProvider private addressesProvider;
+    IPool private pool;
+    ISwapRouter private uniswapRouter;
 
-    // Strategy tracking
-    struct Strategy {
-        uint8 strategyType;
+    // Configurable Variables
+    address private treasuryWallet;
+    uint256 private feeRate;
+
+    struct TokenPair {
+        address token0;
+        address token1;
+        uint24 fee;
         bool isActive;
-        uint256 minProfitThreshold;
-        bytes params;
     }
 
-    mapping(uint256 => Strategy) public strategies;
-    uint256 public strategyCount;
+    struct Strategy {
+        string name;
+        address targetContract;
+        bytes data;
+        bool isActive;
+    }
 
-    mapping(address => bool) private whitelisted;
-    mapping(address => uint256) public userProfits;
-    
-    // Modifiers
-    modifier onlyWhitelisted() {
-        require(whitelisted[msg.sender], "Not whitelisted");
-        _;
+    // Mappings
+    mapping(string => TokenPair) private tokenPairs;
+    mapping(string => Strategy) private strategies;
+    mapping(address => mapping(address => uint256)) private deposits; // User deposits
+    mapping(address => uint256) private totalDeposits;               // Total token deposits
+    mapping(address => bool) private isSupported;                   // Supported tokens
+    mapping(string => address) private cqtContracts;                // CQT contracts
+
+    struct InitializationParams {
+        address defaultAdmin;
+        address pauser;
+        address upgrader;
+        address operator;
+        address uniswapRouter;
+        address addressesProvider;
+        address treasuryWallet;
+        uint256 feeRate;
+        address[] supportedTokens;
     }
 
     // Events
-    event WhitelistUpdated(address indexed user, bool status);
+    event TokenPairAdded(string indexed pairName, address indexed token0, address indexed token1, uint24 fee);
+    event StrategyAdded(string indexed strategyName, address indexed targetContract);
+    event StrategyExecuted(string strategyName, bool success);
     event TreasuryWalletUpdated(address indexed oldWallet, address indexed newWallet);
-    event FeeRateUpdated(uint256 oldFeeRate, uint256 newFeeRate);
+    event FeeRateUpdated(uint256 oldRate, uint256 newRate);
     event FlashLoanExecuted(address indexed initiator, address[] tokens, uint256[] amounts, uint256 profit);
-    event ProfitDistributed(address indexed initiator, uint256 userProfit, uint256 fee);
-    event StrategyExecuted(uint8 strategyType, uint256 profit);
-    event StrategyAdded(uint256 indexed strategyId, uint8 strategyType);
-    event StrategyUpdated(uint256 indexed strategyId, uint8 strategyType, bool isActive);
+    event Deposit(address indexed user, address indexed token, uint256 amount);
+    event Withdraw(address indexed user, address indexed token, uint256 amount);
+    event CqtContractUpdated(string indexed contractName, address indexed contractAddress);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() payable {
+    constructor() {
         _disableInitializers();
     }
 
-    function initialize(
-        address defaultAdmin,
-        address upgrader,
-        address provider,
-        address nft721Address,
-        address nft1155Address,
-        address cqtTokenAddress,
-        address uniswapRouterAddress,
-        address daoAddress,
-        address stakingAddress,
-        address farmingAddress,
-        address nftMarketplaceAddress,
-        address guildInteractionAddress,
-        address cqtTokenSaleContractAddress,
-        address nftBookContractAddress,
-        address nftBookSalesContractAddress,
-        address swapContractAddress,
-        address _treasuryWallet,
-        uint256 _feeRate
-    ) public initializer {
-        require(_treasuryWallet != address(0), "Invalid treasury wallet");
-        require(_feeRate <= MAX_FEE_RATE, "Fee rate too high");
-        require(provider != address(0), "Invalid provider address");
-
+    function initialize(InitializationParams memory params) public initializer {
         __ERC20_init("CryptoQuestAIFlashLoanArbitrator", "CQAF");
         __ERC20Burnable_init();
-        __ERC20FlashMint_init();
+        __ERC20Pausable_init();
         __AccessControl_init();
+        __ERC20Permit_init("CryptoQuestAIFlashLoanArbitrator");
+        __ERC20FlashMint_init();
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
-        __Pausable_init();
 
-        _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin);
-        _grantRole(UPGRADER_ROLE, upgrader);
-        _grantRole(OPERATOR_ROLE, defaultAdmin);
+        _grantRole(DEFAULT_ADMIN_ROLE, params.defaultAdmin);
+        _grantRole(PAUSER_ROLE, params.pauser);
+        _grantRole(UPGRADER_ROLE, params.upgrader);
+        _grantRole(OPERATOR_ROLE, params.operator);
 
-        addressesProvider = IPoolAddressesProvider(provider);
+        addressesProvider = IPoolAddressesProvider(params.addressesProvider);
         pool = IPool(addressesProvider.getPool());
-        nftContract = IERC721EnumerableUpgradeable(nft721Address);
-        nftContract1155 = IERC1155Upgradeable(nft1155Address);
-        cqtToken = IERC20(cqtTokenAddress);
-        uniswapRouter = ISwapRouter(uniswapRouterAddress);
-        daoContract = IDAOUpgradeable(daoAddress);
-        stakingContract = IStakingUpgradeable(stakingAddress);
-        farmingContract = IFarmingUpgradeable(farmingAddress);
-        nftMarketplaceContract = INFTMarketplaceUpgradeable(nftMarketplaceAddress);
-        guildInteractionContract = IGuildInteractionUpgradeable(guildInteractionAddress);
-        cqtTokenSaleContract = ICQTTokenSaleContract(cqtTokenSaleContractAddress);
-        nftBookContract = ICryptoQuestTheShardsOfGenesisNFTBook(nftBookContractAddress);
-        nftBookSalesContract = ICryptoQuestTheShardsOfGenesisBookNFTSalesContract(nftBookSalesContractAddress);
-        swapContract = ICryptoQuestSwapContract(swapContractAddress);
-        treasuryWallet = _treasuryWallet;
-        feeRate = _feeRate;
+        uniswapRouter = ISwapRouter(params.uniswapRouter);
+        treasuryWallet = params.treasuryWallet;
+        feeRate = params.feeRate;
+
+        for (uint256 i = 0; i < params.supportedTokens.length; ++i) {
+            isSupported[params.supportedTokens[i]] = true;
+        }
+
+        // Predefine token pairs
+        _addTokenPair("CQT-WETH", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619, 3000);
+        _addTokenPair("CQT-WBTC", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6, 3000);
+        _addTokenPair("CQT-WMATIC", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270, 3000);
     }
 
-    // Admin functions
-    function updateTreasuryWallet(address newWallet) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newWallet != address(0), "Invalid wallet address");
-        address oldWallet = treasuryWallet;
-        treasuryWallet = newWallet;
-        emit TreasuryWalletUpdated(oldWallet, newWallet);
+    function _addTokenPair(string memory pairName, address token0, address token1, uint24 fee) internal {
+        require(!tokenPairs[pairName].isActive, "Token pair already exists");
+        tokenPairs[pairName] = TokenPair(token0, token1, fee, true);
+        emit TokenPairAdded(pairName, token0, token1, fee);
     }
 
-    function updateFeeRate(uint256 newFeeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newFeeRate <= MAX_FEE_RATE, "Fee rate too high");
-        uint256 oldFeeRate = feeRate;
-        feeRate = newFeeRate;
-        emit FeeRateUpdated(oldFeeRate, newFeeRate);
+    function addStrategy(string memory strategyName, address targetContract, bytes memory data) external onlyRole(OPERATOR_ROLE) {
+        require(targetContract != address(0), "Invalid contract address");
+        strategies[strategyName] = Strategy(strategyName, targetContract, data, true);
+        emit StrategyAdded(strategyName, targetContract);
     }
 
-    function updateWhitelist(address user, bool status) external onlyRole(OPERATOR_ROLE) {
-        whitelisted[user] = status;
-        emit WhitelistUpdated(user, status);
-    }
-
-    function pause() external onlyRole(OPERATOR_ROLE) {
-        _pause();
-    }
-
-    function unpause() external onlyRole(OPERATOR_ROLE) {
-        _unpause();
-    }
-
-    // Strategy management
-    function addStrategy(
-        uint8 strategyType,
-        uint256 minProfitThreshold,
-        bytes calldata params
-    ) external onlyRole(OPERATOR_ROLE) returns (uint256) {
-        strategyCount++;
-        strategies[strategyCount] = Strategy({
-            strategyType: strategyType,
-            isActive: true,
-            minProfitThreshold: minProfitThreshold,
-            params: params
-        });
-        emit StrategyAdded(strategyCount, strategyType);
-        return strategyCount;
-    }
-
-    function updateStrategy(
-        uint256 strategyId,
-        bool isActive,
-        uint256 minProfitThreshold,
-        bytes calldata params
-    ) external onlyRole(OPERATOR_ROLE) {
-        require(strategyId <= strategyCount, "Invalid strategy ID");
-        Strategy storage strategy = strategies[strategyId];
-        strategy.isActive = isActive;
-        strategy.minProfitThreshold = minProfitThreshold;
-        strategy.params = params;
-        emit StrategyUpdated(strategyId, strategy.strategyType, isActive);
-    }
-
-    // Flash loan execution
     function executeFlashLoan(
         address[] calldata tokens,
         uint256[] calldata amounts,
-        uint256[] calldata modes,
-        uint256[] calldata strategyIds
-    ) external nonReentrant whenNotPaused onlyWhitelisted {
-        require(tokens.length == amounts.length, "Array length mismatch");
-        require(tokens.length == modes.length, "Array length mismatch");
-        require(strategyIds.length > 0, "No strategies provided");
+        string[] calldata strategyNames
+    ) external nonReentrant onlyRole(OPERATOR_ROLE) whenNotPaused {
+        require(tokens.length == amounts.length, "Length mismatch");
+        require(strategyNames.length > 0 && strategyNames.length <= MAX_ARRAY_LENGTH, "Invalid strategy names");
 
-        for (uint256 i = 0; i < strategyIds.length; i++) {
-            require(strategyIds[i] <= strategyCount, "Invalid strategy ID");
-            require(strategies[strategyIds[i]].isActive, "Strategy not active");
-        }
-
-        // Execute flash loan
-        bytes memory params = abi.encode(tokens, amounts, modes, strategyIds);
+        bytes memory params = abi.encode(tokens, amounts, strategyNames);
         pool.flashLoan(
             address(this),
             tokens,
             amounts,
-            modes,
+            new uint256[](tokens.length),
             address(this),
             params,
             0
         );
     }
 
-    // Flash loan callback
     function executeOperation(
         address[] calldata tokens,
         uint256[] calldata amounts,
@@ -245,142 +165,95 @@ contract CryptoQuestAIFlashLoanArbitrator is
         address initiator,
         bytes calldata params
     ) external returns (bool) {
-        require(msg.sender == address(pool), "Caller must be pool");
-        
-        (address[] memory _tokens, uint256[] memory _amounts, uint256[] memory _modes, uint256[] memory strategyIds) = 
-            abi.decode(params, (address[], uint256[], uint256[], uint256[]));
+        require(msg.sender == address(pool), "Unauthorized");
 
-        uint256 totalProfit = 0;
+        // Decode params (only keep strategyNames as other variables are unused)
+        (, , string[] memory strategyNames) = abi.decode(params, (address[], uint256[], string[]));
 
         // Execute strategies
-        for (uint256 i = 0; i < strategyIds.length; i++) {
-            Strategy storage strategy = strategies[strategyIds[i]];
-            uint256 profit = executeStrategy(strategy.strategyType, _tokens[0], strategy.params);
-            require(profit >= strategy.minProfitThreshold, "Profit below threshold");
-            totalProfit += profit;
-            emit StrategyExecuted(strategy.strategyType, profit);
+        _executeStrategies(strategyNames);
+
+        // Approve loan repayment for each token
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            uint256 repayment = amounts[i] + premiums[i];
+            IERC20(tokens[i]).approve(address(pool), repayment);
         }
 
-        // Repay flash loan
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 amountOwed = amounts[i] + premiums[i];
-            IERC20(tokens[i]).approve(address(pool), amountOwed);
-        }
-
-        // Distribute profits
-        if (totalProfit > 0) {
-            distributeProfits(initiator, totalProfit);
-        }
-
-        emit FlashLoanExecuted(initiator, tokens, amounts, totalProfit);
+        emit FlashLoanExecuted(initiator, tokens, amounts, 0);
         return true;
     }
 
-    // Strategy execution
-    function executeStrategy(uint8 strategyType, address asset, bytes memory params) internal returns (uint256) {
-        if (strategyType == 1) {
-            return executeDEXTrade(asset, params);
-        } else if (strategyType == 2) {
-            return manageStaking(asset, params);
-        } else if (strategyType == 3) {
-            return manageFarming(asset, params);
-        } else if (strategyType == 4) {
-            return tradeNFT(asset, params);
-        } else if (strategyType == 5) {
-            return manageGuild(params);
+    function _executeStrategies(string[] memory strategyNames) internal {
+        uint256 length = strategyNames.length;
+        for (uint256 i = 0; i < length; ++i) {
+            Strategy memory strategy = strategies[strategyNames[i]];
+            require(strategy.isActive, "Inactive strategy");
+
+            (bool success, ) = strategy.targetContract.call(strategy.data);
+            emit StrategyExecuted(strategy.name, success);
         }
-        revert("Invalid strategy type");
     }
 
-    function executeDEXTrade(address asset, bytes memory params) internal returns (uint256) {
-        (address[] memory path, uint256 minAmountOut) = abi.decode(params, (address[], uint256));
-        uint256 amountIn = IERC20(asset).balanceOf(address(this));
-        IERC20(asset).approve(address(swapContract), amountIn);
-
-        uint256[] memory amounts = swapContract.swapExactTokensForTokens(
-            amountIn,
-            minAmountOut,
-            path,
-            address(this),
-            block.timestamp + 300
-        );
-
-        return amounts[amounts.length - 1];
+    function updateTreasuryWallet(address newTreasuryWallet) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newTreasuryWallet != address(0), "Invalid address");
+        address oldWallet = treasuryWallet;
+        treasuryWallet = newTreasuryWallet;
+        emit TreasuryWalletUpdated(oldWallet, newTreasuryWallet);
     }
 
-    function manageStaking(address asset, bytes memory params) internal returns (uint256) {
-        uint256 stakeAmount = abi.decode(params, (uint256));
-        IERC20(asset).approve(address(stakingContract), stakeAmount);
-        stakingContract.stake(stakeAmount);
-        stakingContract.claimRewards();
-        stakingContract.unstake(stakeAmount);
-
-        return stakingContract.getRewardsAvailable(address(this));
+    function updateFeeRate(uint256 newFeeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newFeeRate >= MIN_FEE_RATE && newFeeRate <= MAX_FEE_RATE, "Fee rate out of bounds");
+        emit FeeRateUpdated(feeRate, newFeeRate);
+        feeRate = newFeeRate;
     }
 
-    function manageFarming(address asset, bytes memory params) internal returns (uint256) {
-        uint256 farmAmount = abi.decode(params, (uint256));
-        IERC20(asset).approve(address(farmingContract), farmAmount);
-        farmingContract.deposit(farmAmount);
-        farmingContract.harvest();
-        farmingContract.withdraw(farmAmount);
-
-        return farmAmount;
+    function addCqtContract(string memory contractName, address contractAddress) external onlyRole(OPERATOR_ROLE) {
+        require(contractAddress != address(0), "Invalid contract address");
+        cqtContracts[contractName] = contractAddress;
+        emit CqtContractUpdated(contractName, contractAddress);
     }
 
-    function tradeNFT(address nftContractAddress, bytes memory params) internal returns (uint256) {
-        (uint256 tokenId, uint256 maxPrice) = abi.decode(params, (uint256, uint256));
-        uint256 listingPrice = nftMarketplaceContract.getListingPrice(nftContractAddress, tokenId);
-        require(listingPrice <= maxPrice, "Price too high");
+    function deposit(address token, uint256 amount) external nonReentrant {
+        require(isSupported[token], "Unsupported token");
+        require(amount > 0, "Zero amount");
 
-        nftMarketplaceContract.buyItem{value: listingPrice}(nftContractAddress, tokenId);
-        nftMarketplaceContract.listItem(nftContractAddress, tokenId, listingPrice * 2);
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        deposits[msg.sender][token] += amount;
+        totalDeposits[token] += amount;
 
-        return listingPrice;
+        emit Deposit(msg.sender, token, amount);
     }
 
-    function manageGuild(bytes memory params) internal returns (uint256) {
-        (uint8 action, uint256 guildId, uint256 questId) = abi.decode(params, (uint8, uint256, uint256));
+    function withdraw(address token, uint256 amount) external nonReentrant {
+        require(deposits[msg.sender][token] >= amount, "Insufficient balance");
 
-        if (action == 1) {
-            guildInteractionContract.joinGuild(guildId);
-        } else if (action == 2) {
-            guildInteractionContract.completeQuest(questId);
-        } else {
-            revert("Invalid guild action");
-        }
+        deposits[msg.sender][token] -= amount;
+        totalDeposits[token] -= amount;
+        IERC20(token).transfer(msg.sender, amount);
 
-        return guildInteractionContract.getPendingRewards(address(this));
+        emit Withdraw(msg.sender, token, amount);
     }
 
-    // Profit distribution
-    function distributeProfits(address initiator, uint256 totalProfit) internal {
-        uint256 fee = (totalProfit * feeRate) / 10000;
-        uint256 userProfit = totalProfit - fee;
-
-        // Transfer fee to treasury
-        if (fee > 0) {
-            cqtToken.transfer(treasuryWallet, fee);
-        }
-
-        // Update user profits
-        userProfits[initiator] += userProfit;
-        
-        emit ProfitDistributed(initiator, userProfit, fee);
+    function getPairDetails(string memory pairName) public view returns (TokenPair memory) {
+        require(tokenPairs[pairName].isActive, "Token pair not active");
+        return tokenPairs[pairName];
     }
 
-    // Withdraw profits
-    function withdrawProfits() external nonReentrant {
-        uint256 amount = userProfits[msg.sender];
-        require(amount > 0, "No profits to withdraw");
-        
-        userProfits[msg.sender] = 0;
-        cqtToken.transfer(msg.sender, amount);
+    function pause() public onlyRole(PAUSER_ROLE) {
+        _pause();
     }
 
-    // Required overrides
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
+    function unpause() public onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
 
-    // Receive function
-    receive() external payable {}
+    function _authorizeUpgrade(address newImplementation) internal onlyRole(UPGRADER_ROLE) override {}
+
+    // Override Functions
+    function _update(address from, address to, uint256 value)
+        internal
+        override(ERC20Upgradeable, ERC20PausableUpgradeable)
+    {
+        super._update(from, to, value);
+    }
 }
