@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.21;
 
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
@@ -32,18 +32,18 @@ contract CryptoQuestAIFlashLoanArbitrator is
     bytes32 private constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
     // Constants
-    uint256 private constant MAX_FEE_RATE = 1000; // 10% max fee
-    uint256 private constant MIN_FEE_RATE = 50;   // 0.5% min fee
-    uint256 private constant MAX_ARRAY_LENGTH = 100;
+    uint256 private constant _MAX_FEE_RATE = 1000; // 10% max fee
+    uint256 private constant _MIN_FEE_RATE = 50;   // 0.5% min fee
+    uint256 private constant MAX_ARRAY_LENGTH = 100; // Limit external array size
 
     // Interfaces
-    IPoolAddressesProvider private addressesProvider;
-    IPool private pool;
-    ISwapRouter private uniswapRouter;
+    IPoolAddressesProvider private _addressesProvider;
+    IPool private _pool;
+    ISwapRouter private _uniswapRouter;
 
     // Configurable Variables
-    address private treasuryWallet;
-    uint256 private feeRate;
+    address private _treasuryWallet;
+    uint256 private _feeRate;
 
     struct TokenPair {
         address token0;
@@ -60,12 +60,11 @@ contract CryptoQuestAIFlashLoanArbitrator is
     }
 
     // Mappings
-    mapping(string => TokenPair) private tokenPairs;
-    mapping(string => Strategy) private strategies;
-    mapping(address => mapping(address => uint256)) private deposits; // User deposits
-    mapping(address => uint256) private totalDeposits;               // Total token deposits
-    mapping(address => bool) private isSupported;                   // Supported tokens
-    mapping(string => address) private cqtContracts;                // CQT contracts
+    mapping(string => TokenPair) private _tokenPairs;
+    mapping(string => Strategy) private _strategies;
+    mapping(address => mapping(address => uint256)) private _deposits; // User deposits
+    mapping(address => uint256) private _totalDeposits;               // Total token deposits
+    mapping(address => bool) private _isSupported;                   // Supported tokens
 
     struct InitializationParams {
         address defaultAdmin;
@@ -81,14 +80,12 @@ contract CryptoQuestAIFlashLoanArbitrator is
 
     // Events
     event TokenPairAdded(string indexed pairName, address indexed token0, address indexed token1, uint24 fee);
-    event StrategyAdded(string indexed strategyName, address indexed targetContract);
     event StrategyExecuted(string strategyName, bool success);
     event TreasuryWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event FeeRateUpdated(uint256 oldRate, uint256 newRate);
     event FlashLoanExecuted(address indexed initiator, address[] tokens, uint256[] amounts, uint256 profit);
     event Deposit(address indexed user, address indexed token, uint256 amount);
     event Withdraw(address indexed user, address indexed token, uint256 amount);
-    event CqtContractUpdated(string indexed contractName, address indexed contractAddress);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -110,14 +107,14 @@ contract CryptoQuestAIFlashLoanArbitrator is
         _grantRole(UPGRADER_ROLE, params.upgrader);
         _grantRole(OPERATOR_ROLE, params.operator);
 
-        addressesProvider = IPoolAddressesProvider(params.addressesProvider);
-        pool = IPool(addressesProvider.getPool());
-        uniswapRouter = ISwapRouter(params.uniswapRouter);
-        treasuryWallet = params.treasuryWallet;
-        feeRate = params.feeRate;
+        _addressesProvider = IPoolAddressesProvider(params.addressesProvider);
+        _pool = IPool(_addressesProvider.getPool());
+        _uniswapRouter = ISwapRouter(params.uniswapRouter);
+        _treasuryWallet = params.treasuryWallet;
+        _feeRate = params.feeRate;
 
         for (uint256 i = 0; i < params.supportedTokens.length; ++i) {
-            isSupported[params.supportedTokens[i]] = true;
+            _isSupported[params.supportedTokens[i]] = true;
         }
 
         // Predefine token pairs
@@ -127,15 +124,9 @@ contract CryptoQuestAIFlashLoanArbitrator is
     }
 
     function _addTokenPair(string memory pairName, address token0, address token1, uint24 fee) internal {
-        require(!tokenPairs[pairName].isActive, "Token pair already exists");
-        tokenPairs[pairName] = TokenPair(token0, token1, fee, true);
+        require(!_tokenPairs[pairName].isActive, "Token pair already exists");
+        _tokenPairs[pairName] = TokenPair(token0, token1, fee, true);
         emit TokenPairAdded(pairName, token0, token1, fee);
-    }
-
-    function addStrategy(string memory strategyName, address targetContract, bytes memory data) external onlyRole(OPERATOR_ROLE) {
-        require(targetContract != address(0), "Invalid contract address");
-        strategies[strategyName] = Strategy(strategyName, targetContract, data, true);
-        emit StrategyAdded(strategyName, targetContract);
     }
 
     function executeFlashLoan(
@@ -143,11 +134,12 @@ contract CryptoQuestAIFlashLoanArbitrator is
         uint256[] calldata amounts,
         string[] calldata strategyNames
     ) external nonReentrant onlyRole(OPERATOR_ROLE) whenNotPaused {
+        require(tokens.length <= MAX_ARRAY_LENGTH, "Token array too large");
         require(tokens.length == amounts.length, "Length mismatch");
-        require(strategyNames.length > 0 && strategyNames.length <= MAX_ARRAY_LENGTH, "Invalid strategy names");
+        require(strategyNames.length > 0, "No strategies provided");
 
         bytes memory params = abi.encode(tokens, amounts, strategyNames);
-        pool.flashLoan(
+        _pool.flashLoan(
             address(this),
             tokens,
             amounts,
@@ -165,18 +157,18 @@ contract CryptoQuestAIFlashLoanArbitrator is
         address initiator,
         bytes calldata params
     ) external returns (bool) {
-        require(msg.sender == address(pool), "Unauthorized");
+        require(msg.sender == address(_pool), "Unauthorized");
 
-        // Decode params (only keep strategyNames as other variables are unused)
+        // Decode params
         (, , string[] memory strategyNames) = abi.decode(params, (address[], uint256[], string[]));
 
-        // Execute strategies
         _executeStrategies(strategyNames);
 
-        // Approve loan repayment for each token
-        for (uint256 i = 0; i < tokens.length; ++i) {
+        // Repay loans
+        uint256 length = tokens.length;
+        for (uint256 i = 0; i < length; ++i) {
             uint256 repayment = amounts[i] + premiums[i];
-            IERC20(tokens[i]).approve(address(pool), repayment);
+            IERC20(tokens[i]).approve(address(_pool), repayment);
         }
 
         emit FlashLoanExecuted(initiator, tokens, amounts, 0);
@@ -186,7 +178,7 @@ contract CryptoQuestAIFlashLoanArbitrator is
     function _executeStrategies(string[] memory strategyNames) internal {
         uint256 length = strategyNames.length;
         for (uint256 i = 0; i < length; ++i) {
-            Strategy memory strategy = strategies[strategyNames[i]];
+            Strategy memory strategy = _strategies[strategyNames[i]];
             require(strategy.isActive, "Inactive strategy");
 
             (bool success, ) = strategy.targetContract.call(strategy.data);
@@ -194,49 +186,35 @@ contract CryptoQuestAIFlashLoanArbitrator is
         }
     }
 
-    function updateTreasuryWallet(address newTreasuryWallet) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newTreasuryWallet != address(0), "Invalid address");
-        address oldWallet = treasuryWallet;
-        treasuryWallet = newTreasuryWallet;
-        emit TreasuryWalletUpdated(oldWallet, newTreasuryWallet);
-    }
-
     function updateFeeRate(uint256 newFeeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newFeeRate >= MIN_FEE_RATE && newFeeRate <= MAX_FEE_RATE, "Fee rate out of bounds");
-        emit FeeRateUpdated(feeRate, newFeeRate);
-        feeRate = newFeeRate;
-    }
-
-    function addCqtContract(string memory contractName, address contractAddress) external onlyRole(OPERATOR_ROLE) {
-        require(contractAddress != address(0), "Invalid contract address");
-        cqtContracts[contractName] = contractAddress;
-        emit CqtContractUpdated(contractName, contractAddress);
+        require(newFeeRate >= _MIN_FEE_RATE && newFeeRate <= _MAX_FEE_RATE, "Fee rate out of bounds");
+        emit FeeRateUpdated(_feeRate, newFeeRate);
+        _feeRate = newFeeRate;
     }
 
     function deposit(address token, uint256 amount) external nonReentrant {
-        require(isSupported[token], "Unsupported token");
+        require(_isSupported[token], "Unsupported token");
         require(amount > 0, "Zero amount");
 
         IERC20(token).transferFrom(msg.sender, address(this), amount);
-        deposits[msg.sender][token] += amount;
-        totalDeposits[token] += amount;
+        _deposits[msg.sender][token] += amount;
+        _totalDeposits[token] += amount;
 
         emit Deposit(msg.sender, token, amount);
     }
 
     function withdraw(address token, uint256 amount) external nonReentrant {
-        require(deposits[msg.sender][token] >= amount, "Insufficient balance");
+        require(_deposits[msg.sender][token] >= amount, "Insufficient balance");
 
-        deposits[msg.sender][token] -= amount;
-        totalDeposits[token] -= amount;
-        IERC20(token).transfer(msg.sender, amount);
-
+        _deposits[msg.sender][token] -= amount;
+        _totalDeposits[token] -= amount;
         emit Withdraw(msg.sender, token, amount);
+        IERC20(token).transfer(msg.sender, amount);
     }
 
     function getPairDetails(string memory pairName) public view returns (TokenPair memory) {
-        require(tokenPairs[pairName].isActive, "Token pair not active");
-        return tokenPairs[pairName];
+        require(_tokenPairs[pairName].isActive, "Token pair not active");
+        return _tokenPairs[pairName];
     }
 
     function pause() public onlyRole(PAUSER_ROLE) {
