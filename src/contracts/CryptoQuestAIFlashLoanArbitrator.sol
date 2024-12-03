@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.21;
 
+// Importing necessary interfaces and contracts
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
@@ -15,6 +16,22 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
+// Sample CryptoQuest Token Contract
+contract CryptoQuestToken is ERC20Upgradeable {
+    function initialize() public initializer {
+        __ERC20_init("CryptoQuestToken", "CQT");
+        _mint(msg.sender, 1000000 * 10 ** decimals());
+    }
+}
+
+// Sample Game Mechanics Contract
+contract GameMechanics {
+    function executeGameLogic() external {
+        // Game logic goes here
+    }
+}
+
+// Combined CQAF Contract
 contract CryptoQuestAIFlashLoanArbitrator is
     Initializable,
     ERC20Upgradeable,
@@ -30,13 +47,12 @@ contract CryptoQuestAIFlashLoanArbitrator is
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
     bytes32 private constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    
+    // Additional Contracts
+    CryptoQuestToken public questToken; // Reference to CryptoQuestToken contract
+    GameMechanics public gameMechanics; // Reference to GameMechanics contract
 
-    // Constants
-    uint256 private constant _MAX_FEE_RATE = 1000; // 10% max fee
-    uint256 private constant _MIN_FEE_RATE = 50;   // 0.5% min fee
-    uint256 private constant MAX_ARRAY_LENGTH = 100; // Limit external array size
-
-    // Interfaces
+    // Existing CQAF Variables...
     IPoolAddressesProvider private _addressesProvider;
     IPool private _pool;
     ISwapRouter private _uniswapRouter;
@@ -44,6 +60,8 @@ contract CryptoQuestAIFlashLoanArbitrator is
     // Configurable Variables
     address private _treasuryWallet;
     uint256 private _feeRate;
+    uint256 private _maxFeeRate = 200; // 2% max fee
+    uint256 private _minFeeRate = 50;   // 0.5% min fee
 
     struct TokenPair {
         address token0;
@@ -63,7 +81,7 @@ contract CryptoQuestAIFlashLoanArbitrator is
     mapping(string => TokenPair) private _tokenPairs;
     mapping(string => Strategy) private _strategies;
     mapping(address => mapping(address => uint256)) private _deposits; // User deposits
-    mapping(address => uint256) private _totalDeposits;               // Total token deposits
+    mapping(address => uint256) private _totalDeposits;              // Total token deposits
     mapping(address => bool) private _isSupported;                   // Supported tokens
 
     struct InitializationParams {
@@ -86,6 +104,7 @@ contract CryptoQuestAIFlashLoanArbitrator is
     event FlashLoanExecuted(address indexed initiator, address[] tokens, uint256[] amounts, uint256 profit);
     event Deposit(address indexed user, address indexed token, uint256 amount);
     event Withdraw(address indexed user, address indexed token, uint256 amount);
+    event GamePlayed(address indexed player);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -117,16 +136,36 @@ contract CryptoQuestAIFlashLoanArbitrator is
             _isSupported[params.supportedTokens[i]] = true;
         }
 
+        // Initialize the additional contracts
+        questToken = new CryptoQuestToken();
+        gameMechanics = new GameMechanics();
+
         // Predefine token pairs
         _addTokenPair("CQT-WETH", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619, 3000);
         _addTokenPair("CQT-WBTC", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6, 3000);
         _addTokenPair("CQT-WMATIC", 0x94ef57abfBff1AD70bD00a921e1d2437f31C1665, 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270, 3000);
     }
 
-    function _addTokenPair(string memory pairName, address token0, address token1, uint24 fee) internal {
+    function _addTokenPair(string memory pairName, address token0, address token1, uint24 fee) internal onlyRole(OPERATOR_ROLE) {
         require(!_tokenPairs[pairName].isActive, "Token pair already exists");
         _tokenPairs[pairName] = TokenPair(token0, token1, fee, true);
         emit TokenPairAdded(pairName, token0, token1, fee);
+    }
+
+    function addOrUpdateTokenPair(
+        string memory pairName,
+        address token0,
+        address token1,
+        uint24 fee
+    ) external onlyRole(OPERATOR_ROLE) {
+        _tokenPairs[pairName] = TokenPair(token0, token1, fee, true);
+        emit TokenPairAdded(pairName, token0, token1, fee);
+    }
+
+    function deactivateTokenPair(string memory pairName) external onlyRole(OPERATOR_ROLE) {
+        require(_tokenPairs[pairName].isActive, "Token pair is already inactive");
+        _tokenPairs[pairName].isActive = false;
+        emit TokenPairAdded(pairName, _tokenPairs[pairName].token0, _tokenPairs[pairName].token1, _tokenPairs[pairName].fee);
     }
 
     function executeFlashLoan(
@@ -134,7 +173,7 @@ contract CryptoQuestAIFlashLoanArbitrator is
         uint256[] calldata amounts,
         string[] calldata strategyNames
     ) external nonReentrant onlyRole(OPERATOR_ROLE) whenNotPaused {
-        require(tokens.length <= MAX_ARRAY_LENGTH, "Token array too large");
+        require(tokens.length <= 100, "Token array too large");
         require(tokens.length == amounts.length, "Length mismatch");
         require(strategyNames.length > 0, "No strategies provided");
 
@@ -186,10 +225,24 @@ contract CryptoQuestAIFlashLoanArbitrator is
         }
     }
 
-    function updateFeeRate(uint256 newFeeRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newFeeRate >= _MIN_FEE_RATE && newFeeRate <= _MAX_FEE_RATE, "Fee rate out of bounds");
-        emit FeeRateUpdated(_feeRate, newFeeRate);
-        _feeRate = newFeeRate;
+    function updateDynamicFeeRate(uint256 utilizationRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(utilizationRate <= 100, "Utilization rate must be between 0 and 100");
+        
+        if (utilizationRate < 30) {
+            _feeRate = _minFeeRate; // 0.5% fee
+        } else if (utilizationRate < 70) {
+            _feeRate = 100; // 1% fee
+        } else {
+            _feeRate = _maxFeeRate; // 2% fee
+        }
+
+        emit FeeRateUpdated(_feeRate, utilizationRate);
+    }
+
+    function updateFeeBounds(uint256 newMax, uint256 newMin) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newMin < newMax, "Invalid bounds");
+        _maxFeeRate = newMax;
+        _minFeeRate = newMin;
     }
 
     function deposit(address token, uint256 amount) external nonReentrant {
@@ -209,7 +262,19 @@ contract CryptoQuestAIFlashLoanArbitrator is
         _deposits[msg.sender][token] -= amount;
         _totalDeposits[token] -= amount;
         emit Withdraw(msg.sender, token, amount);
-        IERC20(token).transfer(msg.sender, amount);
+
+        bool success = IERC20(token).transfer(msg.sender, amount);
+        require(success, "Transfer failed");
+    }
+
+    function playGame() external {
+        gameMechanics.executeGameLogic();
+        emit GamePlayed(msg.sender);
+    }
+
+    function rewardPlayer(address player, uint256 rewardAmount) external onlyRole(OPERATOR_ROLE) {
+        require(rewardAmount > 0, "Invalid reward");
+        questToken.transfer(player, rewardAmount);
     }
 
     function getPairDetails(string memory pairName) public view returns (TokenPair memory) {
