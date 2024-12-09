@@ -1,4 +1,4 @@
-// pairs/CQTWETH.js
+// abis/CQTWETH.js
 export const CQTWETH = {
   pairAddress: '0xb1e0b26f550203fab31a0d9c1eb4ffe330bfe4d0',
   token0: {
